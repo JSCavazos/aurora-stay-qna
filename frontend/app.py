@@ -2,6 +2,14 @@
 import streamlit as st
 import requests
 import os
+import re
+
+
+def render_policy_text(text):
+    """Display currency literally while retaining Markdown layout and citations."""
+    # Dollar signs in hotel fees are currency, not paired LaTeX delimiters.
+    escaped = re.sub(r"(?<!\\)\$", lambda match: "\\$", text)
+    st.markdown(escaped)
 
 
 # ---------------------------------------------------------
@@ -128,18 +136,18 @@ if st.button("Submit", type="primary"):
                 if response_type == "Answer only":
 
                     st.subheader("Answer")
-                    st.write(result["answer"])
+                    render_policy_text(result["answer"])
 
                 # -- Answer + Relevant Chunks -------------------
                 else:
 
                     st.subheader("Answer")
-                    st.write(result["answer"])
+                    render_policy_text(result["answer"])
 
                     st.subheader("Relevant Chunks")
                     for i, chunk in enumerate(result["relevant_chunks"], start=1):
                         with st.expander(f"Source {i}"):
-                            st.write(chunk)
+                            render_policy_text(chunk)
 
             else:
                 st.error(
