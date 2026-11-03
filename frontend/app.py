@@ -86,77 +86,96 @@ response_type = st.radio(
 
 
 # ---------------------------------------------------------
-# Query input
+# Single or batch input; both use the same deployed RAG endpoint.
 # ---------------------------------------------------------
 
-query = st.text_input(
-    "Your question",
-    placeholder="e.g., What is the pet fee at ASH-CHI Loop for a four-night stay?"
+input_mode = st.radio(
+    "Input mode", ["Single question", "Batch questions"], horizontal=True
 )
+if input_mode == "Single question":
+    query_text = st.text_input(
+        "Your question",
+        placeholder="e.g., What is the pet fee at ASH-CHI Loop for a four-night stay?"
+    )
+else:
+    query_text = st.text_area(
+        "Questions (one per line)",
+        height=140,
+        placeholder=(
+            "What is the pet fee at ASH-CHI Loop for a four-night stay?\n"
+            "How many people can stay in a Double Queen room?\n"
+            "Does a member discount automatically mean I can cancel for free?"
+        ),
+    )
+    st.caption("Submit up to 10 questions together. Each is processed in order with the same settings.")
 
 
-# ---------------------------------------------------------
-# Submit
-# ---------------------------------------------------------
+def request_answer(question, endpoint, settings):
+    """Keep a failed request local to its question so the batch can continue."""
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}{endpoint}",
+            json={"query": question, **settings},
+            timeout=(10, 90),
+        )
+        if response.status_code != 200:
+            return {"question": question, "error": f"RAG API returned HTTP {response.status_code}."}
+        result = response.json()
+        if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
+            raise ValueError("Missing answer")
+        chunks = result.get("relevant_chunks", [])
+        if not isinstance(chunks, list) or not all(isinstance(chunk, str) for chunk in chunks):
+            raise ValueError("Invalid sources")
+        return {"question": question, "answer": result["answer"], "chunks": chunks}
+    except requests.exceptions.RequestException:
+        return {"question": question, "error": "Unable to connect to the RAG API. Check the backend service."}
+    except (ValueError, TypeError):
+        return {"question": question, "error": "The RAG API returned an invalid response."}
 
-if st.button("Submit", type="primary"):
 
-    if not query.strip():
-        st.warning("Please enter a question.")
-
+if st.button("Run batch" if input_mode == "Batch questions" else "Submit", type="primary"):
+    questions = [line.strip() for line in query_text.splitlines() if line.strip()]
+    if not questions:
+        st.warning("Please enter at least one question.")
+    elif len(questions) > 10:
+        st.warning("Please submit no more than 10 questions at a time.")
     else:
-
-        # Pick endpoint
-        if response_type == "Answer only":
-            endpoint = "/v1/answer"
-        else:
-            endpoint = "/v1/answer_with_relevant_chunks"
-
-        # Build request payload with parameters
-        payload = {
-            "query": query,
-            "k": k,
-            "temperature": temperature,
-            "max_tokens": max_tokens
+        endpoint = "/v1/answer" if response_type == "Answer only" else "/v1/answer_with_relevant_chunks"
+        settings = {
+            "k": k, "temperature": temperature, "max_tokens": max_tokens,
+            "model_name": "gpt-4o-mini", "top_p": 1,
+        }
+        results = []
+        with st.spinner("Processing questions..."):
+            for question in questions:
+                results.append(request_answer(question, endpoint, settings))
+        # Retain completed answers across widget reruns without issuing more requests.
+        st.session_state["inference_results"] = {
+            "mode": input_mode, "response_type": response_type,
+            "settings": settings, "results": results,
         }
 
-        try:
-            with st.spinner("Thinking…"):
-                response = requests.post(
-                    f"{BACKEND_URL}{endpoint}",
-                    json=payload,
-                    timeout=90
-                )
-
-            if response.status_code == 200:
-
-                result = response.json()
-
-                # -- Answer only --------------------------------
-                if response_type == "Answer only":
-
-                    st.subheader("Answer")
-                    render_policy_text(result["answer"])
-
-                # -- Answer + Relevant Chunks -------------------
-                else:
-
-                    st.subheader("Answer")
-                    render_policy_text(result["answer"])
-
-                    st.subheader("Relevant Chunks")
-                    for i, chunk in enumerate(result["relevant_chunks"], start=1):
-                        with st.expander(f"Source {i}"):
-                            render_policy_text(chunk)
-
-            else:
-                st.error(
-                    f"Unable to get a response from the RAG API. "
-                    f"Status code: {response.status_code}"
-                )
-
-        except requests.exceptions.RequestException:
-            st.error(
-                "Unable to connect to the RAG API. "
-                "Please make sure the backend service is running."
-            )
+saved = st.session_state.get("inference_results")
+if saved:
+    results = saved["results"]
+    successes = sum("answer" in result for result in results)
+    st.subheader("Batch results" if saved["mode"] == "Batch questions" else "Result")
+    st.caption(
+        f"{successes}/{len(results)} requests succeeded | "
+        f"K={saved['settings']['k']} | Temperature={saved['settings']['temperature']} | "
+        f"Max tokens={saved['settings']['max_tokens']} | {saved['response_type']}"
+    )
+    for number, result in enumerate(results, start=1):
+        if saved["mode"] == "Batch questions":
+            st.markdown(f"**Question {number}**")
+        st.write(result["question"])
+        if "error" in result:
+            st.error(result["error"])
+            continue
+        st.subheader("Answer")
+        render_policy_text(result["answer"])
+        if saved["response_type"] == "Answer + Relevant Chunks":
+            for source_number, chunk in enumerate(result["chunks"], start=1):
+                with st.expander(f"Question {number} - Source {source_number}"):
+                    render_policy_text(chunk)
+        st.divider()
